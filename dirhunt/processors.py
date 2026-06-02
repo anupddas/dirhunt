@@ -11,6 +11,7 @@ if sys.version_info < (3,):
 from bs4 import Comment
 from colorama import Fore, Back
 
+from dirhunt.cms import detect_cms_from_asset, detect_cms_from_html
 from dirhunt.colors import status_code_colors
 from dirhunt.crawler_url import CrawlerUrl
 from dirhunt.url import Url, full_url_address
@@ -79,6 +80,7 @@ class ProcessBase(object):
         # TODO: procesar otras cosas (css, etc.)
         self.crawler_url = crawler_url
         self.keywords_found = set()
+        self.cms_detected = set()  # human-readable CMS names found on this page
 
     def search_index_files(self):
         if self.crawler_url.type not in ['directory', None]:
@@ -138,6 +140,9 @@ class ProcessBase(object):
         if self.keywords_found:
             body += colored('\n    Keywords found: ', Fore.BLUE)
             body += ', '.join(self.keywords_found)
+        if self.cms_detected:
+            body += colored('\n    CMS detected: ', Fore.GREEN)
+            body += colored(', '.join(sorted(self.cms_detected)), Fore.LIGHTGREEN_EX)
         return body
 
     def json(self):
@@ -145,6 +150,7 @@ class ProcessBase(object):
             'processor_class': '{}'.format(self.__class__.__name__),
             'status_code': self.status_code,
             'crawler_url': self.crawler_url.json(),
+            'cms_detected': sorted(self.cms_detected),
             'line': str(self),
         }
 
@@ -292,7 +298,18 @@ class ProcessHtmlRequest(ProcessBase):
         self.search_keywords(text)
         self.assets(soup)
         self.links(soup)
+        self._detect_cms_from_document(text, soup)
         self.search_index_files()
+
+    def _detect_cms_from_document(self, text, soup):
+        """Run full-document CMS detection (meta tags, headers, HTML patterns)."""
+        response_headers = {}
+        if self.crawler_url.resp is not None:
+            response_headers = self.crawler_url.resp.headers
+        matched = detect_cms_from_html(text, soup, response_headers, self.crawler_url.flags)
+        for cms in matched:
+            self.crawler_url.flags.add(cms['flag'])
+            self.cms_detected.add(cms['name'])
 
     def links(self, soup):
         links = [full_url_address(link.attrs.get('href'), self.crawler_url.url)
@@ -326,13 +343,18 @@ class ProcessHtmlRequest(ProcessBase):
 
     def analyze_asset(self, asset):
         """
+        Inspect a discovered asset URL for CMS fingerprints.
 
         :type asset: Url
         """
-        if 'wordpress' not in self.crawler_url.flags and 'wp-content' in asset.path:
-            self.crawler_url.flags.update({'wordpress'})
-            # Override type always except for root path
-            self.crawler_url.type = 'rewrite' if self.crawler_url.type != 'directory' else 'directory'
+        cms = detect_cms_from_asset(asset.path, self.crawler_url.flags)
+        if cms:
+            self.crawler_url.flags.add(cms['flag'])
+            self.cms_detected.add(cms['name'])
+            # Preserve existing type-override logic from the original WordPress check
+            self.crawler_url.type = (
+                'rewrite' if self.crawler_url.type != 'directory' else 'directory'
+            )
             self.crawler_url.depth -= 1
 
     @classmethod
